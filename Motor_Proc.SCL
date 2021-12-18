@@ -1,0 +1,90 @@
+FUNCTION_BLOCK "Motor_Proc"
+TITLE='电机控制 运行计时'
+VERSION:'0.03'
+KNOW_HOW_PROTECT
+AUTHOR:Goosy
+NAME:MotorPrc
+FAMILY:GoosyLib
+
+CONST
+END_CONST
+
+VAR_INPUT
+    Remote {S7_m_c := 'true'} : BOOL;            // 远程模式，紧停不受此限制
+    EN_Run {S7_m_c := 'true'} : BOOL := TRUE;    // 允许启动 （比如已蓄能、高压到位等）
+    Run_State {S7_m_c := 'true'} : BOOL;         // 运行状态输入
+    Error {S7_m_c := 'true'} : BOOL;             // 电机错误
+    Time_Pulse : BOOL;                           // 计时脉冲，通常是秒脉冲，可打开CPU的时钟存储器并将1HZ做为输入
+    Delay_Time {S7_m_c := 'true'} : DINT := 200; // 防抖时间(毫秒)
+    delaytime AT Delay_Time : TIME;              // 防抖时间
+END_VAR
+
+VAR_IN_OUT
+    Run_CMD {S7_m_c := 'true'} : BOOL;      // 开电机命令
+    Stop_CMD {S7_m_c := 'true'} : BOOL;     // 停电机命令
+    IStop_CMD {S7_m_c := 'true'} : BOOL;    // 紧急停电机命令，输出电路应不受远程切换开关的屏蔽
+END_VAR
+
+VAR_OUTPUT
+    Run_Coil {S7_m_c := 'true'} : BOOL;     // 启输出
+    Stop_Coil {S7_m_c := 'true'} : BOOL;    // 停输出
+    IStop_Coil {S7_m_c := 'true'} : BOOL;   // 急停输出
+    Running_Time {S7_m_c := 'true'} : DINT; // 运行时间(单位秒)
+END_VAR
+
+VAR
+    Time_Pulse_Edge : BOOL;   //秒脉冲
+    Running_Time_Count : DINT; //计时总数
+    DelayON : TON;
+END_VAR
+
+BEGIN
+
+    // 复位启动
+    IF NOT EN_Run OR Run_State THEN
+        Run_CMD := FALSE;
+        Run_Coil := FALSE;
+    END_IF;
+
+    // 复位停止
+    IF NOT Run_State THEN
+        Stop_CMD := FALSE;
+        Stop_Coil := FALSE;
+        IStop_CMD := FALSE;
+        IStop_Coil := FALSE;
+    END_IF;
+
+    // 非远程复位，不含急停
+    IF NOT Remote THEN
+        Run_CMD := FALSE;
+        Run_Coil := FALSE;
+        Stop_CMD := FALSE;
+        Stop_Coil := FALSE;
+    END_IF;
+
+    // 急停优先
+    IF IStop_CMD THEN
+        Run_CMD := FALSE;
+        Run_Coil := FALSE;
+        Stop_CMD := FALSE;
+        // Stop_Coil := FALSE; //不要将 Stop_Coil 复位
+        IStop_Coil := TRUE; 
+    END_IF;
+
+    // 输出防抖
+    DelayON(
+        IN := Run_CMD OR Stop_CMD,
+        PT := delaytime);
+    IF DelayON.Q THEN
+        Run_Coil := Run_CMD;
+        Stop_Coil := Stop_CMD;
+    END_IF;
+
+    // 运行时间计数，计时脉冲必须输入
+    IF Run_State AND Time_Pulse AND NOT Time_Pulse_Edge THEN
+        Running_Time_Count := Running_Time_Count + 1; 
+    END_IF;
+    Time_Pulse_Edge := Time_Pulse;
+    Running_Time := Running_Time_Count; 
+
+END_FUNCTION_BLOCK
