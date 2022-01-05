@@ -1,0 +1,64 @@
+---
+# 指示本配置为生成 Motor 代码
+type: Motor
+CPU: AS
+
+symbols:  
+  # 系统已有2个内置符号，其内容由本程序自动生成：
+  # - [Motor_Proc, FB513]   电机主处理函数
+  # - [Motor_Loop, FC513]   主调用函数
+  # 可以在对上述内置符号的地址进行更改，只要重新定义就可以了，注意保持名称一致
+
+  # 以下为自定义符号
+  - [DI03-01, M4.0]
+  - [DI03-02, M+]
+  - [DI03-03, M+]
+  - [DI03-04, M+]
+  - [DI03-05, M+]
+  - [DI03-06, M+]
+  - [DI03-07, M+]
+  - [DI03-08, M+]
+  - [DO03-01, M8.0]
+  - [DO03-02, M+]
+  - [DO03-03, M+]
+  - [DO03-04, M+]
+  - [DO03-05, M+]
+  - [DO03-06, M+]
+  - [DO03-07, M+]
+  - [DO03-08, M+]
+
+list :
+  # 最全输入输出
+  - comment: A电机
+    DB: [PUMP-001A, DB91]          # DB块
+    enable: DI03-01                # 允许运行，（比如已蓄能、高压到位等）
+    run: DI03-02                   # 运行状态
+    error: DI03-03                 # 电机故障输入
+    remote: DI03-04                # 电机远程就地操作模式
+    timer_pulse: M0.5              # 计时脉冲，这里用周期存储器输入1HZ脉冲
+    over_time: 1000                # 操作返回延时，超时后撤回信号并指示启停失败
+    start_action: DO03-01          # 启电机线路
+    stop_action: DO03-02           # 停电机线路
+    estop_action: DO03-03          # 紧急停机线路
+    run_command: M0.7
+    stop_command: NOT M0.7
+    estop_command: M6.0
+
+  # 常用输入输出
+  - comment: B电机
+    DB: [PUMP-001B, DB+]
+    enable: DI03-05
+    run: DI03-06
+    error: DI03-07
+    remote: DI03-08
+    start_action: DO03-05
+    stop_action: DO03-06
+
+  # 最少输入输出
+  - comment: C电机
+    DB: [PUMP-001C, DB+]
+    # 省略 error(默认FALSE) remote(默认TRUE) 参数时，必须保证PLC运行时不被改变
+    stateless: true       # 指示没有运行状态
+    stop_action: DO03-08  # 只能关阀
+
+...

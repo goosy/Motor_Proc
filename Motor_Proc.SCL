@@ -1,90 +1,202 @@
 FUNCTION_BLOCK "Motor_Proc"
 TITLE='电机控制 运行计时'
-VERSION:'0.03'
+VERSION:'0.06'
 KNOW_HOW_PROTECT
 AUTHOR:Goosy
 NAME:MotorPrc
 FAMILY:GoosyLib
 
 CONST
+  UNKNOWN := 0;
+  STOPED := 1;
+  STARTING := 2;
+  RUNNING := 4;
+  STOPPING := 8;
+  START_FAILURE := 16;
+  STOP_FAILURE := 32;
 END_CONST
 
 VAR_INPUT
-    Remote {S7_m_c := 'true'} : BOOL;            // 远程模式，紧停不受此限制
-    EN_Run {S7_m_c := 'true'} : BOOL := TRUE;    // 允许启动 （比如已蓄能、高压到位等）
-    Run_State {S7_m_c := 'true'} : BOOL;         // 运行状态输入
-    Error {S7_m_c := 'true'} : BOOL;             // 电机错误
-    Time_Pulse : BOOL;                           // 计时脉冲，通常是秒脉冲，可打开CPU的时钟存储器并将1HZ做为输入
-    Delay_Time {S7_m_c := 'true'} : DINT := 200; // 防抖时间(毫秒)
-    delaytime AT Delay_Time : TIME;              // 防抖时间
+  remote {S7_m_c := 'true'} : BOOL := TRUE;    // 远程模式，紧停不受此限制
+  enable_run {S7_m_c := 'true'} : BOOL := TRUE;// 允许启动 （比如已蓄能、高压到位等）
+  run {S7_m_c := 'true'} : BOOL;               // 运行状态输入
+  stateless {S7_m_c := 'true'} : BOOL;         // 指示该电机没有运行状态返回电路，不再根据run信号判断启停
+  error {S7_m_c := 'true'} : BOOL;             // 指示电机错误
+  timer_pulse : BOOL;                          // 计时脉冲，通常是秒脉冲，可打开CPU的时钟存储器并将1HZ做为输入。不需要计时则该参数置false
+  over_time {S7_m_c := 'true'} : DINT := 5000; // 线圈输出超时时间(毫秒)
+  delaytime AT over_time : TIME;               // 同上，TIME类型
 END_VAR
 
 VAR_IN_OUT
-    Run_CMD {S7_m_c := 'true'} : BOOL;      // 开电机命令
-    Stop_CMD {S7_m_c := 'true'} : BOOL;     // 停电机命令
-    IStop_CMD {S7_m_c := 'true'} : BOOL;    // 紧急停电机命令，输出电路应不受远程切换开关的屏蔽
+  start_CMD {S7_m_c := 'true'} : BOOL;         // 启电机命令
+  stop_CMD {S7_m_c := 'true'} : BOOL;          // 停电机命令
+  E_stop_CMD {S7_m_c := 'true'} : BOOL;        // 紧急停电机命令，对应输出电路为E_stop_coil。该电路应不受远程切换开关的限制
+  running_time {S7_m_c := 'true'} : DINT;      // 运行时间(单位秒)
 END_VAR
 
 VAR_OUTPUT
-    Run_Coil {S7_m_c := 'true'} : BOOL;     // 启输出
-    Stop_Coil {S7_m_c := 'true'} : BOOL;    // 停输出
-    IStop_Coil {S7_m_c := 'true'} : BOOL;   // 急停输出
-    Running_Time {S7_m_c := 'true'} : DINT; // 运行时间(单位秒)
+  run_coil {S7_m_c := 'true'} : BOOL;          // 运行输出，没有stop_CMD命令不会撤回信号。用在无启动自保持电机中
+  start_coil {S7_m_c := 'true'} : BOOL;        // 启动输出，用在有启动自保持电机中。电机启动后或超时后撤回信号
+  stop_coil {S7_m_c := 'true'} : BOOL;         // 停输出，电机停止后或超时后撤回信号
+  E_stop_coil {S7_m_c := 'true'} : BOOL;       // 急停输出
+  state {S7_m_c := 'true'} : INT;              // 状态输出
 END_VAR
 
 VAR
-    Time_Pulse_Edge : BOOL;   //秒脉冲
-    Running_Time_Count : DINT; //计时总数
-    DelayON : TON;
+  timer_pulse_Follower : BOOL;                 // 计时脉冲跟随
+  run_signal : BOOL;                           // 运行信号
+  stop_signal : BOOL;                          // 停止信号
+  emergency : BOOL;                            // 紧急停止指示
+  _state : INT;                                // 状态 见const
+  running_time_count : DINT;                   // 计时总数
+  delayon : TON;
 END_VAR
 
 BEGIN
 
-    // 复位启动
-    IF NOT EN_Run OR Run_State THEN
-        Run_CMD := FALSE;
-        Run_Coil := FALSE;
-    END_IF;
+// 外部输入：remote enable_run run_signal stop_signal stateless error
+//          start_CMD stop_CMD E_stop_CMD
+// 状态输出：run_coil start_coil stop_coil E_stop_coil state
+IF stateless THEN
+  run_signal := FALSE;
+  stop_signal := FALSE;
+ELSE
+  run_signal := run;
+  stop_signal := NOT run;
+END_IF;
 
-    // 复位停止
-    IF NOT Run_State THEN
-        Stop_CMD := FALSE;
-        Stop_Coil := FALSE;
-        IStop_CMD := FALSE;
-        IStop_Coil := FALSE;
+// 禁止启动
+IF NOT enable_run OR NOT remote OR error THEN
+  start_CMD := FALSE;
+  IF _state = STARTING OR _state = START_FAILURE THEN
+    // 分别退回到 STOPED 或 UNKNOWN 状态
+    IF stateless THEN
+      _state := UNKNOWN;
+    ELSE
+      _state := STOPED;
     END_IF;
+  END_IF;
+END_IF;
 
-    // 非远程复位，不含急停
-    IF NOT Remote THEN
-        Run_CMD := FALSE;
-        Run_Coil := FALSE;
-        Stop_CMD := FALSE;
-        Stop_Coil := FALSE;
+// 禁止正常停止
+IF NOT remote OR error THEN
+  stop_CMD := FALSE;
+  IF _state = STOPPING OR _state = STOP_FAILURE THEN
+    // 分别退回到 RUNNING 或 UNKNOWN 状态
+    IF stateless THEN
+      _state := UNKNOWN;
+    ELSE
+      _state := RUNNING;
     END_IF;
+  END_IF;
+END_IF;
 
-    // 急停优先
-    IF IStop_CMD THEN
-        Run_CMD := FALSE;
-        Run_Coil := FALSE;
-        Stop_CMD := FALSE;
-        // Stop_Coil := FALSE; //不要将 Stop_Coil 复位
-        IStop_Coil := TRUE; 
-    END_IF;
+// 状态输入信号
+IF run_signal THEN // 运行信号 隐含 NOT stateless
+  start_CMD := FALSE;
+  // 只能是 STOPPING STOP_FAILURE RUNNING 三种状态之一
+  IF _state <> STOPPING OR _state <> STOP_FAILURE THEN
+    _state := RUNNING;
+  END_IF;
+ELSIF stop_signal THEN  // 停止信号 隐含 NOT stateless
+  stop_CMD := FALSE;
+  E_stop_CMD := FALSE;
+  // 只能是 STARTING START_FAILURE STOPED 三种状态之一
+  IF _state <> STARTING OR _state <> START_FAILURE THEN
+    _state := STOPED;
+  END_IF;
+ELSE // 无状态信号
+  // 只能是 STARTING STOPPING UNKNOWN 三种状态之一
+  IF _state <> STARTING OR _state <> STOPPING THEN
+    _state := UNKNOWN;
+  END_IF;
+END_IF;
 
-    // 输出防抖
-    DelayON(
-        IN := Run_CMD OR Stop_CMD,
-        PT := delaytime);
-    IF DelayON.Q THEN
-        Run_Coil := Run_CMD;
-        Stop_Coil := Stop_CMD;
-    END_IF;
+// 急停优先
+IF E_stop_CMD THEN
+  start_CMD := FALSE;
+  stop_CMD := FALSE;
+  _state := STOPPING;
+  emergency := TRUE;
+END_IF;
 
-    // 运行时间计数，计时脉冲必须输入
-    IF Run_State AND Time_Pulse AND NOT Time_Pulse_Edge THEN
-        Running_Time_Count := Running_Time_Count + 1; 
-    END_IF;
-    Time_Pulse_Edge := Time_Pulse;
-    Running_Time := Running_Time_Count; 
+// 停命令
+IF stop_CMD THEN
+  start_CMD := FALSE;
+  _state := STOPPING;
+  emergency := FALSE;
+END_IF;
+
+// 启命令
+IF start_CMD THEN
+  // stop_CMD := FALSE; 上下顺序逻辑下无必要
+  _state := STARTING;
+END_IF;
+
+// 输出超时撤回
+delayon(
+  IN := (_state = STARTING) OR (_state = STOPPING),
+  PT := delaytime);
+IF delayon.Q AND _state = STARTING THEN
+  // STARTING 超时后状态只能是 UNKNOWN START_FAILURE 二者之一
+  start_CMD := FALSE;
+  IF stateless THEN
+    _state := UNKNOWN;
+  ELSE
+    _state := START_FAILURE;
+  END_IF;
+END_IF;
+IF delayon.Q AND _state = STOPPING THEN
+  // STOPPING 超时后状态只能是 UNKNOWN STOP_FAILURE 二者之一
+  stop_CMD := FALSE;
+  E_stop_CMD := FALSE;
+  IF stateless THEN
+    _state := UNKNOWN;
+  ELSE
+    _state := STOP_FAILURE;
+  END_IF;
+END_IF;
+
+// 状态约束
+IF _state = UNKNOWN THEN
+  // run_coil 保持原值
+  start_coil := FALSE;
+  stop_coil := FALSE;
+  E_stop_coil := FALSE;
+ELSIF _state = STOPED THEN
+  run_coil := FALSE;
+  start_coil := FALSE;
+  stop_coil := FALSE;
+  E_stop_coil := FALSE;
+ELSIF _state = STARTING THEN
+  run_coil := TRUE;
+  start_coil := TRUE;
+  stop_coil := FALSE;
+  E_stop_coil := FALSE;
+ELSIF _state = RUNNING THEN
+  run_coil := TRUE;
+  start_coil := FALSE;
+  stop_coil := FALSE;
+  E_stop_coil := FALSE;
+ELSIF _state = STOPPING THEN
+  run_coil := FALSE;
+  start_coil := FALSE;
+  stop_coil := NOT emergency;
+  E_stop_coil := emergency;
+ELSIF (_state = START_FAILURE) OR (_state = STOP_FAILURE) THEN
+  run_coil := FALSE;
+  start_coil := FALSE;
+  stop_coil := FALSE;
+  E_stop_coil := FALSE;
+END_IF;
+
+// 运行时间计数
+IF run_signal THEN
+  IF timer_pulse AND NOT timer_pulse_Follower THEN
+    running_time_count := running_time_count + 1; 
+  END_IF;
+  timer_pulse_Follower := timer_pulse;
+  running_time := running_time_count; 
+END_IF;
 
 END_FUNCTION_BLOCK
