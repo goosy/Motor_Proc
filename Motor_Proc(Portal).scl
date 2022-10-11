@@ -1,0 +1,189 @@
+﻿FUNCTION_BLOCK "Motor_Proc"
+{ S7_Optimized_Access := 'FALSE' }
+AUTHOR : Goosy
+FAMILY : GooLib
+NAME : MotorPrc
+VERSION : 1.0
+
+VAR_INPUT
+  remote : Bool := TRUE;         // remote mode, emergency stop is not limited by this
+  enable_run : Bool := TRUE;     // enable to start (such as stored energy, high voltage in place, etc.)
+  run : Bool;                    // run state input
+  stateless : Bool;              // indicates that the motor has no running state, and no longer judges the start and stop according to the run input
+  error : Bool;                  // indicates motor error
+  over_time : DInt := 5000;      // coil output timeout (ms)
+  delaytime AT over_time : TIME; // same as above, TIME type
+END_VAR
+
+VAR_IN_OUT
+  start_CMD : Bool;              // start the motor command
+  stop_CMD : Bool;               // stop the motor command
+  E_stop_CMD : Bool;             // emergency stop the motor command
+END_VAR
+
+VAR_OUTPUT
+  run_coil : Bool;               // running output coil until stop_CMD. Used in stateless mode
+  start_coil : Bool;             // start output, used in self-sustaining motors with start. withdraw signal after motor start or after timeout
+  stop_coil : Bool;              // stop output, the signal is withdrawn after the motor stops or after a timeout
+  E_stop_coil : Bool;            // emergency stop output
+  state : Int;                   // state output
+END_VAR
+
+VAR
+  run_signal : Bool;
+  stop_signal : Bool;
+  emergency : Bool;
+  _state : Int;
+  delayon : TON;
+END_VAR
+
+CONST
+  UNKNOWN := 0;
+  STOPED := 1;
+  STARTING := 2;
+  RUNNING := 4;
+  STOPPING := 8;
+  START_FAILURE := 16;
+  STOP_FAILURE := 32;
+END_CONST
+
+BEGIN
+
+// input: remote enable_run stateless error start_CMD stop_CMD E_stop_CMD
+// output: run_coil start_coil stop_coil E_stop_coil state
+// inner: run_signal stop_signal emergency
+IF #stateless THEN
+  #run_signal := FALSE;
+  #stop_signal := FALSE;
+ELSE
+  #run_signal := #run;
+  #stop_signal := NOT #run;
+END_IF;
+
+// disable startup
+IF NOT #enable_run OR NOT #remote OR #error THEN
+  #start_CMD := FALSE;
+  IF #_state = #STARTING OR #_state = #START_FAILURE THEN
+    // back to STOPED or UNKNOWN state respectively
+    IF #stateless THEN
+      #_state := #UNKNOWN;
+    ELSE
+      #_state := #STOPED;
+    END_IF;
+  END_IF;
+END_IF;
+
+// disable normal stop
+IF NOT #remote OR #error THEN
+  #stop_CMD := FALSE;
+  IF #_state = #STOPPING OR #_state = #STOP_FAILURE THEN
+    // back to RUNNING or UNKNOWN state respectively
+    IF #stateless THEN
+      #_state := #UNKNOWN;
+    ELSE
+      #_state := #RUNNING;
+    END_IF;
+  END_IF;
+END_IF;
+
+// state input signal
+IF #run_signal THEN // run signal, implied NOT stateless
+  #start_CMD := FALSE;
+  // can only be one of the three states: STOPPING STOP_FAILURE RUNNING
+  IF #_state <> #STOPPING OR #_state <> #STOP_FAILURE THEN
+    #_state := #RUNNING;
+  END_IF;
+ELSIF #stop_signal THEN // stop signal, implies NOT stateless
+  #stop_CMD := FALSE;
+  #E_stop_CMD := FALSE;
+  // can only be one of three states: STARTING START_FAILURE STOPED
+  IF #_state <> #STARTING OR #_state <> #START_FAILURE THEN
+    #_state := #STOPED;
+  END_IF;
+ELSE // stateless signal
+  // can only be one of three states: STARTING STOPPING UNKNOWN
+  IF #_state <> #STARTING OR #_state <> #STOPPING THEN
+    #_state := #UNKNOWN;
+  END_IF;
+END_IF;
+
+// priority emergency stop
+IF #E_stop_CMD THEN
+  #start_CMD := FALSE;
+  #stop_CMD := FALSE;
+  #_state := #STOPPING;
+  #emergency := TRUE;
+END_IF;
+
+// stop command
+IF #stop_CMD THEN
+  #start_CMD := FALSE;
+  #_state := #STOPPING;
+  #emergency := FALSE;
+END_IF;
+
+// start up command
+IF #start_CMD THEN
+  // stop_CMD := FALSE; // not necessary under the above logical sequence
+  #_state := #STARTING;
+END_IF;
+
+// output timeout recall
+#delayon(
+     IN := (#_state = #STARTING) OR (#_state = #STOPPING),
+     PT := delaytime);
+IF #delayon.Q THEN
+  IF #_state = #STARTING THEN
+    // state after STARTING timeout can only be one of UNKNOWN START_FAILURE
+    #start_CMD := FALSE;
+    IF #stateless THEN
+      #_state := #UNKNOWN;
+    ELSE
+      #_state := #START_FAILURE;
+    END_IF;
+  ELSIF #_state = #STOPPING THEN
+    // state after STOPPING timeout can only be one of UNKNOWN STOP_FAILURE
+    #stop_CMD := FALSE;
+    #E_stop_CMD := FALSE;
+    IF #stateless THEN
+      #_state := #UNKNOWN;
+    ELSE
+      #_state := #STOP_FAILURE;
+    END_IF;
+  END_IF;
+END_IF;
+
+// state constraints
+IF #_state = #UNKNOWN THEN
+  // run_coil keep the original value
+  #start_coil := FALSE;
+  #stop_coil := FALSE;
+  #E_stop_coil := FALSE;
+ELSIF #_state = #STOPED THEN
+  #run_coil := FALSE;
+  #start_coil := FALSE;
+  #stop_coil := FALSE;
+  #E_stop_coil := FALSE;
+ELSIF #_state = #STARTING THEN
+  #run_coil := TRUE;
+  #start_coil := TRUE;
+  #stop_coil := FALSE;
+  #E_stop_coil := FALSE;
+ELSIF #_state = #RUNNING THEN
+  #run_coil := TRUE;
+  #start_coil := FALSE;
+  #stop_coil := FALSE;
+  #E_stop_coil := FALSE;
+ELSIF #_state = #STOPPING THEN
+  #run_coil := FALSE;
+  #start_coil := FALSE;
+  #stop_coil := NOT #emergency;
+  #E_stop_coil := #emergency;
+ELSIF (#_state = #START_FAILURE) OR (#_state = #STOP_FAILURE) THEN
+  #run_coil := FALSE;
+  #start_coil := FALSE;
+  #stop_coil := FALSE;
+  #E_stop_coil := FALSE;
+END_IF;
+
+END_FUNCTION_BLOCK
