@@ -1,4 +1,4 @@
-﻿FUNCTION_BLOCK "Motor_Proc"
+FUNCTION_BLOCK "Motor_Proc"
 TITLE = motor controller
 { S7_Optimized_Access := 'FALSE' }
 KNOW_HOW_PROTECT

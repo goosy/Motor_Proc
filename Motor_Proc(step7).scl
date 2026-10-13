@@ -1,4 +1,4 @@
-﻿FUNCTION_BLOCK "Motor_Proc"
+FUNCTION_BLOCK "Motor_Proc"
 TITLE='电机控制'
 KNOW_HOW_PROTECT
 AUTHOR:Goosy
